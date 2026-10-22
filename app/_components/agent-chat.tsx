@@ -3,7 +3,7 @@
 import type { UserContent } from "ai";
 import { useEveAgent } from "eve/react";
 import { AlertCircleIcon, BrainIcon, PlusIcon, SquareIcon } from "lucide-react";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
   Conversation,
   ConversationContent,
@@ -23,8 +23,16 @@ import { Shimmer } from "@/components/ai-elements/shimmer";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { AgentMessage } from "./agent-message";
+import { NotrackSelector, SelectedModelSelection } from "./notrack-selector";
+import { NOTRACK_PROVIDERS } from "@/lib/notrack";
 
 const AGENT_NAME = "negativeai";
+
+interface ChatMessageItem {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+}
 
 export function AgentChat({
   sessionId,
@@ -35,6 +43,35 @@ export function AgentChat({
 }) {
   const [cancellationError, setCancellationError] = useState<string>();
   const [hasInputText, setHasInputText] = useState(false);
+  const [selectedModel, setSelectedModel] = useState<SelectedModelSelection>(() => {
+    const defaultP = NOTRACK_PROVIDERS[0];
+    return {
+      providerId: defaultP.id,
+      model: defaultP.models[0],
+      baseUrl: defaultP.baseUrl,
+      apiKey: defaultP.defaultApiKey,
+    };
+  });
+
+  const [localMessages, setLocalMessages] = useState<ChatMessageItem[]>([]);
+  const [isNotrackStreaming, setIsNotrackStreaming] = useState(false);
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("notrack_selected_model");
+      if (saved) {
+        setSelectedModel(JSON.parse(saved));
+      }
+    } catch {}
+  }, []);
+
+  const handleSelectModel = (sel: SelectedModelSelection) => {
+    setSelectedModel(sel);
+    try {
+      localStorage.setItem("notrack_selected_model", JSON.stringify(sel));
+    } catch {}
+  };
+
   const agent = useEveAgent({
     initialSession:
       sessionId === undefined
@@ -46,7 +83,6 @@ export function AgentChat({
     resume: sessionId !== undefined,
     onSessionChange(session) {
       if (sessionId === undefined && session !== undefined) {
-        // Next patches window.history to navigate, which would detach the active stream.
         History.prototype.replaceState.call(
           window.history,
           window.history.state,
@@ -57,16 +93,11 @@ export function AgentChat({
     },
   });
 
-  const isBusy = agent.status === "submitted" || agent.status === "streaming";
+  const isEveBusy = agent.status === "submitted" || agent.status === "streaming";
+  const isBusy = isEveBusy || isNotrackStreaming;
   const isResuming = agent.status === "resuming";
-  const isEmpty = agent.data.messages.length === 0;
-  const lastMessage = agent.data.messages.at(-1);
-  const isPendingAssistantShell =
-    lastMessage?.role === "assistant" &&
-    lastMessage.parts.every((part) => part.type === "step-start");
-  const showPendingThinking =
-    isBusy &&
-    (agent.status === "submitted" || lastMessage?.role !== "assistant" || isPendingAssistantShell);
+  const isEmpty = localMessages.length === 0 && agent.data.messages.length === 0;
+  
   const turnFailure = isBusy || isResuming ? undefined : getLatestTurnFailure(agent.events);
   const errorMessage = cancellationError ?? agent.error?.message ?? turnFailure;
   const hasConversationContent = sessionless || !isEmpty || errorMessage !== undefined;
@@ -75,6 +106,7 @@ export function AgentChat({
 
   const requestCancellation = () => {
     setCancellationError(undefined);
+    setIsNotrackStreaming(false);
     void agent.cancel().catch((error: unknown) => {
       setCancellationError(toErrorMessage(error));
     });
@@ -86,27 +118,78 @@ export function AgentChat({
 
     setHasInputText(false);
     setCancellationError(undefined);
-    const options = isBusy ? { turnPolicy: "steer" as const } : undefined;
 
-    if (message.files.length === 0) {
-      await agent.send(text, options);
-      return;
-    }
+    // If NoTrack model selected, stream via /api/notrack/chat
+    const userMsg: ChatMessageItem = {
+      id: Math.random().toString(),
+      role: "user",
+      content: text,
+    };
 
-    const parts: UserContent = [];
-    if (text.length > 0) {
-      parts.push({ text, type: "text" });
-    }
-    for (const file of message.files) {
-      parts.push({
-        data: file.url,
-        filename: file.filename,
-        mediaType: file.mediaType,
-        type: "file",
+    const nextMessages = [...localMessages, userMsg];
+    setLocalMessages(nextMessages);
+    setIsNotrackStreaming(true);
+
+    const assistantMsgId = Math.random().toString();
+    setLocalMessages((prev) => [...prev, { id: assistantMsgId, role: "assistant", content: "" }]);
+
+    try {
+      const res = await fetch("/api/notrack/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          baseUrl: selectedModel.baseUrl,
+          apiKey: selectedModel.apiKey,
+          model: selectedModel.model,
+          messages: nextMessages.map((m) => ({ role: m.role, content: m.content })),
+        }),
       });
-    }
 
-    await agent.send(parts, options);
+      if (!res.ok) {
+        const text = await res.text();
+        let errorMsg = "Failed to connect to NoTrack API";
+        try {
+          const errJson = JSON.parse(text);
+          errorMsg = errJson.error || errorMsg;
+        } catch {
+          errorMsg = text || errorMsg;
+        }
+        throw new Error(errorMsg);
+      }
+
+      const reader = res.body?.getReader();
+      const decoder = new TextDecoder();
+
+      if (!reader) throw new Error("No reader available");
+
+      let accumulated = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = decoder.decode(value, { stream: true });
+        // Parse SSE stream format (data: {...})
+        const lines = chunk.split("\n");
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (trimmed.startsWith("data: ")) {
+            const dataStr = trimmed.slice(6);
+            if (dataStr === "[DONE]") continue;
+            try {
+              const parsed = JSON.parse(dataStr);
+              const delta = parsed.choices?.[0]?.delta?.content || "";
+              accumulated += delta;
+              setLocalMessages((prev) =>
+                prev.map((msg) => (msg.id === assistantMsgId ? { ...msg, content: accumulated } : msg))
+              );
+            } catch {}
+          }
+        }
+      }
+    } catch (err: any) {
+      setCancellationError(err?.message || "Failed to generate response");
+    } finally {
+      setIsNotrackStreaming(false);
+    }
   };
 
   const composer = (
@@ -114,7 +197,7 @@ export function AgentChat({
       <PromptInputTextarea
         disabled={isResuming}
         onChange={(event) => setHasInputText(event.currentTarget.value.trim().length > 0)}
-        placeholder="Send a message…"
+        placeholder="Send a message to NoTrack model..."
       />
       <ComposerAction
         hasInputText={hasInputText}
@@ -128,7 +211,7 @@ export function AgentChat({
   return (
     <main className="flex h-dvh flex-col overflow-hidden bg-background text-foreground">
       {showConversationLayout ? (
-        <ChatHeader canStartNewChat={activeSessionId !== undefined} />
+        <ChatHeader canStartNewChat={activeSessionId !== undefined} selectedModel={selectedModel} onSelectModel={handleSelectModel} />
       ) : null}
 
       {showConversationLayout ? (
@@ -144,25 +227,18 @@ export function AgentChat({
         >
           <ConversationTopFade className="top-14" />
           <ConversationContent className="mx-auto w-full max-w-3xl gap-6 px-4 pt-20 pb-36 sm:px-6">
-            {agent.data.messages.map((message, index) =>
-              showPendingThinking &&
-              isPendingAssistantShell &&
-              message.id === lastMessage.id ? null : (
-                <AgentMessage
-                  canRespond={!isBusy && !isResuming}
-                  isStreaming={
-                    agent.status === "streaming" && index === agent.data.messages.length - 1
-                  }
-                  key={message.id}
-                  message={message}
-                  onInputResponses={(inputResponses) => {
-                    setCancellationError(undefined);
-                    return agent.respond(inputResponses);
-                  }}
-                />
-              ),
+            {localMessages.length > 0 ? (
+              localMessages.map((m, index) => (
+                <Message key={m.id} from={m.role}>
+                  <MessageContent>
+                    <div className="whitespace-pre-wrap text-sm">{m.content}</div>
+                  </MessageContent>
+                </Message>
+              ))
+            ) : (
+              agent.data.messages.map((message, index) => <AgentMessage key={message.id} message={message} canRespond={false} isStreaming={false} onInputResponses={() => {}} />)
             )}
-            {showPendingThinking ? <PendingThinking /> : null}
+            {isNotrackStreaming && localMessages.at(-1)?.content === "" ? <PendingThinking /> : null}
             {errorMessage ? <ErrorMessage message={errorMessage} /> : null}
           </ConversationContent>
           <ConversationScrollButton />
@@ -178,8 +254,11 @@ export function AgentChat({
         )}
       >
         {showConversationLayout ? null : (
-          <div className="flex flex-col items-center gap-3 text-center">
-            <h1 className="font-medium text-5xl tracking-tighter">{AGENT_NAME}</h1>
+          <div className="flex flex-col items-center gap-4 text-center">
+            <h1 className="font-semibold text-4xl tracking-tight">{AGENT_NAME}</h1>
+            <div className="w-full flex justify-center">
+              <NotrackSelector selected={selectedModel} onSelect={handleSelectModel} />
+            </div>
           </div>
         )}
         <div className="w-full">{composer}</div>
@@ -237,15 +316,25 @@ function ErrorMessage({ message }: { readonly message: string }) {
   );
 }
 
-function ChatHeader({ canStartNewChat }: { readonly canStartNewChat: boolean }) {
+function ChatHeader({
+  canStartNewChat,
+  selectedModel,
+  onSelectModel,
+}: {
+  readonly canStartNewChat: boolean;
+  readonly selectedModel: SelectedModelSelection;
+  readonly onSelectModel: (sel: SelectedModelSelection) => void;
+}) {
   return (
     <header className="pointer-events-none fixed top-0 right-0 left-0 z-20 h-14">
-      <div className="relative mx-auto flex h-full w-full max-w-3xl items-center justify-center bg-background px-24">
-        <span className="truncate text-muted-foreground text-sm">{AGENT_NAME}</span>
+      <div className="relative mx-auto flex h-full w-full max-w-3xl items-center justify-between bg-background px-4 sm:px-6">
+        <div className="pointer-events-auto">
+          <NotrackSelector selected={selectedModel} onSelect={onSelectModel} />
+        </div>
         {canStartNewChat ? (
           <Button
             aria-label="Start a new chat"
-            className="pointer-events-auto fixed top-3 right-6 pr-4"
+            className="pointer-events-auto"
             onClick={() => window.location.assign("/s")}
             size="sm"
             type="button"

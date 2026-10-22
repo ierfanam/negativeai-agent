@@ -1,0 +1,8 @@
+{
+  "name": "negativeai",
+  "description": "An eve agent app with AI Elements and Next.js.",
+  "requestor": "rajabierfaan@gmail.com",
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

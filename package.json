@@ -9,8 +9,9 @@
   "scripts": {
     "build": "next build",
     "deploy": "eve deploy",
-    "dev": "next dev",
+    "dev": "next dev -p 3000 -H 0.0.0.0",
     "eval": "eve eval",
+    "lint": "next lint",
     "start": "next start",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "build:eve": "eve build",
@@ -18,10 +19,6 @@
     "start:eve": "eve start"
   },
   "dependencies": {
-    "@vercel/connect": "0.4.2",
-    "ai": "7.0.112",
-    "eve": "0.66.0",
-    "zod": "4.4.3",
     "@radix-ui/react-use-controllable-state": "1.2.2",
     "@shikijs/core": "3.23.0",
     "@shikijs/engine-javascript": "3.23.0",
@@ -31,9 +28,13 @@
     "@streamdown/math": "1.0.2",
     "@streamdown/mermaid": "1.0.2",
     "@tailwindcss/postcss": "4.3.0",
+    "@vercel/connect": "0.4.2",
+    "ai": "7.0.112",
+    "better-auth": "1.6.26",
     "class-variance-authority": "0.7.1",
     "clsx": "2.1.1",
     "cmdk": "1.1.1",
+    "eve": "0.66.0",
     "lucide-react": "1.16.0",
     "motion": "12.40.0",
     "nanoid": "5.1.11",
@@ -41,12 +42,13 @@
     "radix-ui": "1.4.3",
     "react": "19.2.6",
     "react-dom": "19.2.6",
+    "recharts": "^3.10.1",
     "shiki": "3.23.0",
     "streamdown": "2.5.0",
     "tailwind-merge": "3.6.0",
     "tailwindcss": "4.3.0",
     "use-stick-to-bottom": "1.1.4",
-    "better-auth": "1.6.26"
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@types/node": "24.13.2",
